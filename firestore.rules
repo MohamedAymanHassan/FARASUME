@@ -1,0 +1,91 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Primitives
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    function isSignedIn() { return request.auth != null; }
+
+    // User Profile Validation
+    function isUserUpdateKeysValid() {
+      return incoming().diff(existing()).affectedKeys().hasOnly(['name', 'tier', 'updatedAt']);
+    }
+    
+    function isValidUserCreate(data) {
+      return data.keys().hasAll(['email', 'tier', 'createdAt', 'updatedAt']) 
+             && data.keys().size() <= 5
+             && data.email is string && data.email.size() <= 200
+             && (!('name' in data) || (data.name is string && data.name.size() <= 100))
+             && data.tier in ['free', 'premium']
+             && data.createdAt == request.time
+             && data.updatedAt == request.time;
+    }
+
+    function isValidUserUpdate(data) {
+      return data.email == existing().email 
+             && data.createdAt == existing().createdAt
+             && data.updatedAt == request.time
+             && data.tier in ['free', 'premium']
+             && (!('name' in data) || (data.name is string && data.name.size() <= 100));
+    }
+
+    // Resume Validation
+    function isResumeUpdateKeysValid() {
+      return incoming().diff(existing()).affectedKeys().hasOnly(['title', 'markdown', 'updatedAt']);
+    }
+    
+    function isValidResumeCreate(data) {
+      return data.keys().hasAll(['userId', 'title', 'markdown', 'createdAt', 'updatedAt'])
+             && data.keys().size() == 5
+             && data.userId is string && data.userId == request.auth.uid
+             && data.title is string && data.title.size() <= 200
+             && data.markdown is string && data.markdown.size() <= 100000 // 100KB markdown cap
+             && data.createdAt == request.time
+             && data.updatedAt == request.time;
+    }
+
+    function isValidResumeUpdate(data) {
+      return data.userId == existing().userId
+             && data.createdAt == existing().createdAt
+             && data.updatedAt == request.time
+             && data.title is string && data.title.size() <= 200
+             && data.markdown is string && data.markdown.size() <= 100000;
+    }
+
+    // Collections
+    match /users/{userId} {
+      allow get: if isSignedIn() && request.auth.uid == userId;
+      allow create: if isSignedIn() && request.auth.uid == userId && isValidUserCreate(incoming());
+      allow update: if isSignedIn() && request.auth.uid == userId 
+                    && isUserUpdateKeysValid() 
+                    && isValidUserUpdate(incoming());
+      // Users cannot be deleted manually via SDK for now
+      allow list, delete: if false; 
+    }
+
+    match /resumes/{resumeId} {
+       allow get: if isSignedIn() && isValidId(resumeId) && existing().userId == request.auth.uid;
+       allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+       
+       allow create: if isSignedIn() && isValidId(resumeId) 
+                     && isValidResumeCreate(incoming())
+                     && exists(/databases/$(database)/documents/users/$(incoming().userId));
+                     
+       allow update: if isSignedIn() && isValidId(resumeId) 
+                     && existing().userId == request.auth.uid
+                     && isResumeUpdateKeysValid()
+                     && isValidResumeUpdate(incoming());
+                     
+       allow delete: if isSignedIn() && isValidId(resumeId) && existing().userId == request.auth.uid;
+    }
+  }
+}
